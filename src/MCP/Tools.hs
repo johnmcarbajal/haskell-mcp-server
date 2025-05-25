@@ -21,6 +21,9 @@ module MCP.Tools (
     uuidHandler,
     base64Tool,
     base64Handler,
+    -- Jeff's Bacon Cheeseburger Invitation Predictor
+    jeffInviteTool,
+    jeffInviteHandler,
 ) where
 
 import Control.Concurrent.STM
@@ -33,6 +36,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Time
+import Data.Time.Calendar.WeekDate
 import Data.UUID (toString)
 import Data.UUID.V4 (nextRandom)
 import System.Random (randomRIO)
@@ -96,11 +100,96 @@ echoHandler args = case fromJSON args of
                     ToolResult
                         [ContentItem "text" "Missing or invalid 'message' parameter"]
                         (Just True)
-        _ ->
-            return $
-                ToolResult
-                    [ContentItem "text" "Invalid arguments format"]
-                    (Just True)
+
+-- | Jeff's Bacon Cheeseburger Invitation Predictor Tool
+jeffInviteTool :: Tool
+jeffInviteTool =
+    Tool
+        "jeff_invite_predictor"
+        "Predict when Jeff will invite you for a bacon cheeseburger (random workday)"
+        ( object
+            [ "type" .= ("object" :: Text)
+            , "properties" .= object []
+            ]
+        )
+
+jeffInviteHandler :: Value -> IO ToolResult
+jeffInviteHandler _ = do
+    currentTime <- getCurrentTime
+    let currentDay = utctDay currentTime
+
+    -- Generate a random number of workdays in the future (1-30 workdays)
+    randomWorkdays <- randomRIO (1, 30) :: IO Int
+
+    -- Calculate the target date by adding workdays (skipping weekends)
+    let targetDate = addWorkdays currentDay randomWorkdays
+
+    -- Generate a random time during work hours (9 AM - 5 PM)
+    randomHour <- randomRIO (9, 17) :: IO Int
+    randomMinute <- randomRIO (0, 59) :: IO Int
+
+    -- Create some fun random variations for the invitation
+    invitationStyle <- do
+        r <- randomRIO (1, 8) :: IO Int
+        return $ case r of
+            1 -> "Hey, want to grab a bacon cheeseburger?"
+            2 -> "I'm thinking bacon cheeseburgers for lunch!"
+            3 -> "Bacon cheeseburger time?"
+            4 -> "Let's hit up that burger place!"
+            5 -> "Craving a bacon cheeseburger - you in?"
+            6 -> "Lunch? I'm buying bacon cheeseburgers!"
+            7 -> "Perfect day for bacon cheeseburgers!"
+            _ -> "How about some delicious bacon cheeseburgers?"
+
+    -- Format the prediction
+    let dayOfWeek = formatTime defaultTimeLocale "%A" targetDate
+    let dateStr = formatTime defaultTimeLocale "%B %d, %Y" targetDate
+    let timeStr =
+            formatTime defaultTimeLocale "%l:%M %p" $
+                UTCTime targetDate (secondsToDiffTime $ fromIntegral $ randomHour * 3600 + randomMinute * 60)
+
+    let prediction =
+            T.unlines
+                [ "🍔 Jeff's Bacon Cheeseburger Invitation Predictor 🥓"
+                , "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                , ""
+                , "📅 **Predicted Date:** " <> T.pack dayOfWeek <> ", " <> T.pack dateStr
+                , "🕐 **Estimated Time:** " <> T.pack (drop 1 timeStr) -- Remove leading space
+                , "💬 **Jeff will probably say:** \"" <> invitationStyle <> "\""
+                , ""
+                , "🎯 **Confidence Level:** "
+                    <> if randomWorkdays <= 7
+                        then "Very High 🔥"
+                        else
+                            if randomWorkdays <= 14
+                                then "High 👍"
+                                else
+                                    if randomWorkdays <= 21
+                                        then "Moderate 🤔"
+                                        else "Optimistic 🌟"
+                , ""
+                , "📊 **Prediction Details:**"
+                , "• Days until invitation: " <> T.pack (show randomWorkdays) <> " workdays"
+                , "• Likelihood of extra bacon: " <> if randomWorkdays `mod` 3 == 0 then "High 🥓🥓" else "Standard 🥓"
+                , "• Recommended response: \"Absolutely! 🍔\""
+                , ""
+                , "⚠️  Note: Predictions based on advanced bacon-cheeseburger algorithms"
+                ]
+
+    return $
+        ToolResult
+            [ContentItem "text" prediction]
+            Nothing
+
+-- Helper function to add workdays (skipping weekends)
+addWorkdays :: Day -> Int -> Day
+addWorkdays startDay 0 = startDay
+addWorkdays startDay n
+    | weekday == 6 = addWorkdays (addDays 2 startDay) n -- Saturday -> Monday
+    | weekday == 7 = addWorkdays (addDays 1 startDay) n -- Sunday -> Monday
+    | otherwise = addWorkdays (addDays 1 startDay) (n - 1)
+  where
+    (_, _, weekday) = toWeekDate startDay
 
 -- | Example Time Tool
 timeTool :: Tool

@@ -40,7 +40,7 @@ runInWebSocketMode :: Int -> IO ()
 runInWebSocketMode port = do
     server <- setupServer
     hPutStrLn stderr $ "Starting Haskell MCP Server on port " ++ show port
-    hPutStrLn stderr "Available tools: echo, current_time, calculate, random_number, text_analysis, weather, generate_uuid, base64"
+    hPutStrLn stderr "Available tools: echo, current_time, calculate, random_number, text_analysis, weather, generate_uuid, base64, jeff_invite_predictor"
     hPutStrLn stderr "Available resources: config://server.json"
     hPutStrLn stderr ""
     hPutStrLn stderr "For Claude Desktop integration, use: haskell-mcp-server-exe --stdio"
@@ -62,6 +62,7 @@ setupServer = do
     addTool server weatherTool weatherHandler
     addTool server uuidTool uuidHandler
     addTool server base64Tool base64Handler
+    addTool server jeffInviteTool jeffInviteHandler
 
     -- Add example resource
     let exampleResource =
@@ -80,7 +81,7 @@ setupServer = do
                         , "version" .= ("0.1.0" :: T.Text)
                         , "mode" .= ("stdio and websocket" :: T.Text)
                         ]
-                , "tools_count" .= (8 :: Int)
+                , "tools_count" .= (9 :: Int)
                 , "capabilities"
                     .= object
                         [ "stdio" .= True
@@ -95,6 +96,7 @@ setupServer = do
                        , "weather"
                        , "generate_uuid"
                        , "base64"
+                       , "jeff_invite_predictor"
                        ]
                 ]
 
