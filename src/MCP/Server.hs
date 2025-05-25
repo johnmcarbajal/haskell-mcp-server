@@ -67,7 +67,7 @@ defaultServer = do
 runMCPServer :: MCPServer -> Int -> IO ()
 runMCPServer server port = do
     hPutStrLn stderr $ "Starting MCP Server on port " ++ show port
-    hPutStrLn stderr "Available tools: echo, current_time, calculate"
+    hPutStrLn stderr "Available tools: echo, current_time, calculate, random_number, text_analysis, weather, generate_uuid, base64"
     hPutStrLn stderr "Available resources: config://server.json"
     WS.runServer "127.0.0.1" port $ \pending -> do
         conn <- WS.acceptRequest pending
@@ -79,7 +79,7 @@ runMCPServer server port = do
 runStdioServer :: MCPServer -> IO ()
 runStdioServer server = do
     hPutStrLn stderr "Starting MCP Server in stdio mode"
-    hPutStrLn stderr "Available tools: echo, current_time, calculate"
+    hPutStrLn stderr "Available tools: echo, current_time, calculate, random_number, text_analysis, weather, generate_uuid, base64"
     hPutStrLn stderr "Available resources: config://server.json"
     hPutStrLn stderr "Server ready, waiting for messages..."
     hFlush stderr
