@@ -38,7 +38,9 @@ module MCP.Types (
 
 import Data.Aeson
 import Data.Text (Text)
+import qualified Data.Text as T
 import GHC.Generics
+import Text.Read (readMaybe)
 
 -- | MCP Protocol Version
 data MCPVersion = MCPVersion
@@ -47,8 +49,20 @@ data MCPVersion = MCPVersion
     }
     deriving (Show, Eq, Generic)
 
-instance ToJSON MCPVersion
-instance FromJSON MCPVersion
+instance ToJSON MCPVersion where
+    toJSON (MCPVersion maj min) = String $ T.pack $ show maj ++ "-" ++ (if min < 10 then "0" else "") ++ show min ++ "-01"
+
+instance FromJSON MCPVersion where
+    parseJSON (String s) = case T.splitOn "-" s of
+        [yearStr, monthStr, _] -> case (readMaybe (T.unpack yearStr), readMaybe (T.unpack monthStr)) of
+            (Just year, Just month) -> return $ MCPVersion year month
+            _ -> fail "Invalid version format"
+        _ -> fail "Invalid version format - expected YYYY-MM-DD"
+    parseJSON (Object o) =
+        MCPVersion
+            <$> o .: "major"
+            <*> o .: "minor"
+    parseJSON _ = fail "Version must be string or object"
 
 -- | Content Item (defined early to avoid dependencies)
 data ContentItem = ContentItem
@@ -150,12 +164,18 @@ data JSONRPCResponse = JSONRPCResponse
 
 instance ToJSON JSONRPCResponse where
     toJSON (JSONRPCResponse j r e i) =
-        object
+        object $
             [ "jsonrpc" .= j
-            , "result" .= r
-            , "error" .= e
             , "id" .= i
             ]
+                ++ ( case r of
+                        Just result -> ["result" .= result]
+                        Nothing -> []
+                   )
+                ++ ( case e of
+                        Just err -> ["error" .= err]
+                        Nothing -> []
+                   )
 
 instance FromJSON JSONRPCResponse where
     parseJSON = withObject "JSONRPCResponse" $ \o ->

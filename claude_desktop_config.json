@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "haskell-mcp-server": {
+      "command": "stack",
+      "args": ["exec", "haskell-mcp-server-exe", "--", "--stdio"],
+      "cwd": "/Users/johncarbajal/Library/Mobile Documents/com~apple~CloudDocs/Source/haskell-mcp-server/.stack-work/install/aarch64-osx/c1d618cb780f39d519aa1610fc2616317d55e4dd2699ea80fb37b60f781dcd7d/9.4.8/bin"
+    }
+  }
+}

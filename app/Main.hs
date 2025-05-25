@@ -5,6 +5,7 @@ module Main where
 import Data.Aeson
 import qualified Data.Text as T
 import System.Environment (getArgs)
+import System.IO (hPutStrLn, stderr)
 import Text.Read (readMaybe)
 
 import MCP.Server
@@ -13,13 +14,41 @@ import MCP.Types
 
 main :: IO ()
 main = do
+    hPutStrLn stderr "Haskell MCP Server starting..."
     args <- getArgs
-    let port = case args of
-            (p : _) -> case readMaybe p of
-                Just n -> n
-                Nothing -> 3000
-            [] -> 3000
+    case args of
+        ["--stdio"] -> runInStdioMode
+        [] -> runInWebSocketMode 3000
+        [portStr] -> case readMaybe portStr of
+            Just port -> runInWebSocketMode port
+            Nothing -> do
+                hPutStrLn stderr "Invalid port number. Usage: haskell-mcp-server-exe [port] or haskell-mcp-server-exe --stdio"
+                hPutStrLn stderr "Examples:"
+                hPutStrLn stderr "  haskell-mcp-server-exe --stdio    # Run in stdio mode for Claude Desktop"
+                hPutStrLn stderr "  haskell-mcp-server-exe            # Run WebSocket server on port 3000"
+                hPutStrLn stderr "  haskell-mcp-server-exe 8080       # Run WebSocket server on port 8080"
+        _ -> do
+            hPutStrLn stderr "Usage: haskell-mcp-server-exe [--stdio | port]"
+            hPutStrLn stderr "  --stdio: Run in stdio mode for Claude Desktop integration"
+            hPutStrLn stderr "  port:    Run WebSocket server on specified port (default: 3000)"
 
+runInStdioMode :: IO ()
+runInStdioMode = do
+    server <- setupServer
+    runStdioServer server
+
+runInWebSocketMode :: Int -> IO ()
+runInWebSocketMode port = do
+    server <- setupServer
+    hPutStrLn stderr $ "Starting Haskell MCP Server on port " ++ show port
+    hPutStrLn stderr "Available tools: echo, current_time, calculate"
+    hPutStrLn stderr "Available resources: config://server.json"
+    hPutStrLn stderr ""
+    hPutStrLn stderr "For Claude Desktop integration, use: haskell-mcp-server-exe --stdio"
+    runMCPServer server port
+
+setupServer :: IO MCPServer
+setupServer = do
     -- Create server instance
     server <- defaultServer
 
@@ -43,13 +72,14 @@ main = do
                     .= object
                         [ "name" .= ("haskell-mcp-server" :: T.Text)
                         , "version" .= ("0.1.0" :: T.Text)
-                        , "port" .= port
+                        , "mode" .= ("stdio and websocket" :: T.Text)
                         ]
                 , "tools_count" .= (3 :: Int)
+                , "capabilities"
+                    .= object
+                        [ "stdio" .= True
+                        , "websocket" .= True
+                        ]
                 ]
 
-    -- Start the server
-    putStrLn $ "Starting Haskell MCP Server on port " ++ show port
-    putStrLn "Available tools: echo, current_time, calculate"
-    putStrLn "Available resources: config://server.json"
-    runMCPServer server port
+    return server
