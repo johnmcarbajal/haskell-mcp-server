@@ -27,11 +27,13 @@ module MCP.Tools (
 ) where
 
 import Control.Concurrent.STM
+import Control.Monad (when)
 import Data.Aeson
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Base64 as B64
 import qualified Data.ByteString.Char8 as BS
 import qualified Data.Map.Strict as Map
+import Data.String (fromString) -- Import fromString to fix the compilation error
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -45,530 +47,359 @@ import Text.Read (readMaybe)
 import MCP.Server
 import MCP.Types
 
--- | Add a tool to the server
+-- | Core helper functions for reducing repetition across all handlers
+
+-- | Create a successful tool result with text content
+success :: Text -> ToolResult
+success msg = ToolResult [ContentItem "text" msg] Nothing
+
+-- | Create an error tool result
+failure :: Text -> ToolResult
+failure msg = ToolResult [ContentItem "text" msg] (Just True)
+
+-- | Parse a required string parameter from JSON arguments
+requireString :: Text -> Value -> Either Text Text
+requireString key (Object o) = case KM.lookup (fromText key) o of
+    Just (String s) -> Right s
+    Just _ -> Left $ "Parameter '" <> key <> "' must be a string"
+    Nothing -> Left $ "Missing required parameter: " <> key
+requireString key _ = Left "Arguments must be an object"
+
+-- | Parse an optional integer parameter with a default value
+optionalInt :: Text -> Int -> Value -> Int
+optionalInt key defaultVal (Object o) = case KM.lookup (fromText key) o of
+    Just (Number n) -> floor n
+    _ -> defaultVal
+optionalInt _ defaultVal _ = defaultVal
+
+-- | Parse an optional string parameter
+optionalString :: Text -> Value -> Maybe Text
+optionalString key (Object o) = case KM.lookup (fromText key) o of
+    Just (String s) -> Just s
+    _ -> Nothing
+optionalString _ _ = Nothing
+
+-- | Helper to convert Text to Aeson Key (for different aeson versions)
+fromText :: Text -> KM.Key
+fromText = fromString . T.unpack
+
+-- | Create a JSON schema for a simple object with properties
+simpleSchema :: [(Text, Value)] -> Value
+simpleSchema props =
+    object
+        [ "type" .= ("object" :: Text)
+        , "properties" .= object (map (\(k, v) -> fromText k .= v) props)
+        ]
+
+-- | Create a JSON schema with required fields
+schemaWithRequired :: [(Text, Value)] -> [Text] -> Value
+schemaWithRequired props required =
+    object
+        [ "type" .= ("object" :: Text)
+        , "properties" .= object (map (\(k, v) -> fromText k .= v) props)
+        , "required" .= required
+        ]
+
+-- | Standard property definitions for reuse
+stringProp :: Text -> Value
+stringProp desc = object ["type" .= ("string" :: Text), "description" .= desc]
+
+intProp :: Text -> Value
+intProp desc = object ["type" .= ("integer" :: Text), "description" .= desc]
+
+enumProp :: Text -> [Text] -> Value
+enumProp desc options =
+    object
+        [ "type" .= ("string" :: Text)
+        , "description" .= desc
+        , "enum" .= options
+        ]
+
+-- | Server modification functions - simplified using pattern matching
 addTool :: MCPServer -> Tool -> (Value -> IO ToolResult) -> IO ()
-addTool server tool handler = atomically $ do
+addTool server tool@(Tool name _ _) handler = atomically $ do
     modifyTVar (tools server) (tool :)
-    modifyTVar (toolHandlers server) (Map.insert (getToolName tool) handler)
-  where
-    getToolName (Tool name _ _) = name
+    modifyTVar (toolHandlers server) (Map.insert name handler)
 
--- | Add a resource to the server
 addResource :: MCPServer -> Resource -> IO Value -> IO ()
-addResource server resource handler = atomically $ do
+addResource server resource@(Resource uri _ _ _) handler = atomically $ do
     modifyTVar (resources server) (resource :)
-    modifyTVar (resourceHandlers server) (Map.insert (getResourceUri resource) handler)
-  where
-    getResourceUri (Resource uri _ _ _) = uri
+    modifyTVar (resourceHandlers server) (Map.insert uri handler)
 
--- | Example Echo Tool
+-- | Tool definitions using our helper functions
 echoTool :: Tool
 echoTool =
-    Tool
-        "echo"
-        "Echo back the input message"
-        ( object
-            [ "type" .= ("object" :: Text)
-            , "properties"
-                .= object
-                    [ "message"
-                        .= object
-                            [ "type" .= ("string" :: Text)
-                            , "description" .= ("Message to echo back" :: Text)
-                            ]
-                    ]
-            , "required" .= (["message"] :: [Text])
-            ]
-        )
+    Tool "echo" "Echo back the input message" $
+        schemaWithRequired [("message", stringProp "Message to echo back")] ["message"]
 
 echoHandler :: Value -> IO ToolResult
-echoHandler args = case fromJSON args of
-    Error err ->
-        return $
-            ToolResult
-                [ContentItem "text" ("Error parsing arguments: " <> T.pack err)]
-                (Just True)
-    Success obj -> case obj of
-        Object o -> case KM.lookup "message" o of
-            Just (String msg) ->
-                return $
-                    ToolResult
-                        [ContentItem "text" ("Echo: " <> msg)]
-                        Nothing
-            _ ->
-                return $
-                    ToolResult
-                        [ContentItem "text" "Missing or invalid 'message' parameter"]
-                        (Just True)
+echoHandler args = return $ case requireString "message" args of
+    Left err -> failure $ "Error: " <> err
+    Right msg -> success $ "Echo: " <> msg
 
--- | Jeff's Bacon Cheeseburger Invitation Predictor Tool
+-- | Jeff's Bacon Cheeseburger Predictor - demonstrating complex tool with no parameters
 jeffInviteTool :: Tool
 jeffInviteTool =
     Tool
         "jeff_invite_predictor"
         "Predict when Jeff will invite you for a bacon cheeseburger (random workday)"
-        ( object
-            [ "type" .= ("object" :: Text)
-            , "properties" .= object []
-            ]
-        )
+        (simpleSchema [])
 
 jeffInviteHandler :: Value -> IO ToolResult
 jeffInviteHandler _ = do
     currentTime <- getCurrentTime
-    let currentDay = utctDay currentTime
-
-    -- Generate a random number of workdays in the future (1-30 workdays)
     randomWorkdays <- randomRIO (1, 30) :: IO Int
 
-    -- Calculate the target date by adding workdays (skipping weekends)
-    let targetDate = addWorkdays currentDay randomWorkdays
+    let currentDay = utctDay currentTime
+        targetDate = addWorkdays currentDay randomWorkdays
 
-    -- Generate a random time during work hours (9 AM - 5 PM)
+    -- Generate random details for the prediction
     randomHour <- randomRIO (9, 17) :: IO Int
     randomMinute <- randomRIO (0, 59) :: IO Int
+    invitationStyle <- randomInvitationMessage
 
-    -- Create some fun random variations for the invitation
-    invitationStyle <- do
-        r <- randomRIO (1, 8) :: IO Int
-        return $ case r of
-            1 -> "Hey, want to grab a bacon cheeseburger?"
-            2 -> "I'm thinking bacon cheeseburgers for lunch!"
-            3 -> "Bacon cheeseburger time?"
-            4 -> "Let's hit up that burger place!"
-            5 -> "Craving a bacon cheeseburger - you in?"
-            6 -> "Lunch? I'm buying bacon cheeseburgers!"
-            7 -> "Perfect day for bacon cheeseburgers!"
-            _ -> "How about some delicious bacon cheeseburgers?"
+    let prediction = formatJeffPrediction targetDate randomHour randomMinute invitationStyle randomWorkdays
+    return $ success prediction
 
-    -- Format the prediction
-    let dayOfWeek = formatTime defaultTimeLocale "%A" targetDate
-    let dateStr = formatTime defaultTimeLocale "%B %d, %Y" targetDate
-    let timeStr =
-            formatTime defaultTimeLocale "%l:%M %p" $
-                UTCTime targetDate (secondsToDiffTime $ fromIntegral $ randomHour * 3600 + randomMinute * 60)
+-- | Helper functions for Jeff's predictor - extracted for clarity
+randomInvitationMessage :: IO Text
+randomInvitationMessage = do
+    r <- randomRIO (1, 8) :: IO Int
+    return $ case r of
+        1 -> "Hey, want to grab a bacon cheeseburger?"
+        2 -> "I'm thinking bacon cheeseburgers for lunch!"
+        3 -> "Bacon cheeseburger time?"
+        4 -> "Let's hit up that burger place!"
+        5 -> "Craving a bacon cheeseburger - you in?"
+        6 -> "Lunch? I'm buying bacon cheeseburgers!"
+        7 -> "Perfect day for bacon cheeseburgers!"
+        _ -> "How about some delicious bacon cheeseburgers?"
 
-    let prediction =
-            T.unlines
-                [ "🍔 Jeff's Bacon Cheeseburger Invitation Predictor 🥓"
-                , "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                , ""
-                , "📅 **Predicted Date:** " <> T.pack dayOfWeek <> ", " <> T.pack dateStr
-                , "🕐 **Estimated Time:** " <> T.pack (drop 1 timeStr) -- Remove leading space
-                , "💬 **Jeff will probably say:** \"" <> invitationStyle <> "\""
-                , ""
-                , "🎯 **Confidence Level:** "
-                    <> if randomWorkdays <= 7
-                        then "Very High 🔥"
-                        else
-                            if randomWorkdays <= 14
-                                then "High 👍"
-                                else
-                                    if randomWorkdays <= 21
-                                        then "Moderate 🤔"
-                                        else "Optimistic 🌟"
-                , ""
-                , "📊 **Prediction Details:**"
-                , "• Days until invitation: " <> T.pack (show randomWorkdays) <> " workdays"
-                , "• Likelihood of extra bacon: " <> if randomWorkdays `mod` 3 == 0 then "High 🥓🥓" else "Standard 🥓"
-                , "• Recommended response: \"Absolutely! 🍔\""
-                , ""
-                , "⚠️  Note: Predictions based on advanced bacon-cheeseburger algorithms"
-                ]
-
-    return $
-        ToolResult
-            [ContentItem "text" prediction]
-            Nothing
-
--- Helper function to add workdays (skipping weekends)
-addWorkdays :: Day -> Int -> Day
-addWorkdays startDay 0 = startDay
-addWorkdays startDay n
-    | weekday == 6 = addWorkdays (addDays 2 startDay) n -- Saturday -> Monday
-    | weekday == 7 = addWorkdays (addDays 1 startDay) n -- Sunday -> Monday
-    | otherwise = addWorkdays (addDays 1 startDay) (n - 1)
+formatJeffPrediction :: Day -> Int -> Int -> Text -> Int -> Text
+formatJeffPrediction targetDate randomHour randomMinute invitation randomWorkdays =
+    T.unlines
+        [ "🍔 Jeff's Bacon Cheeseburger Invitation Predictor 🥓"
+        , "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        , ""
+        , "📅 **Predicted Date:** " <> dayOfWeek <> ", " <> dateStr
+        , "🕐 **Estimated Time:** " <> timeStr
+        , "💬 **Jeff will probably say:** \"" <> invitation <> "\""
+        , ""
+        , "🎯 **Confidence Level:** " <> confidenceLevel
+        , ""
+        , "📊 **Prediction Details:**"
+        , "• Days until invitation: " <> T.pack (show randomWorkdays) <> " workdays"
+        , "• Likelihood of extra bacon: " <> if randomWorkdays `mod` 3 == 0 then "High 🥓🥓" else "Standard 🥓"
+        , "• Recommended response: \"Absolutely! 🍔\""
+        , ""
+        , "⚠️  Note: Predictions based on advanced bacon-cheeseburger algorithms"
+        ]
   where
-    (_, _, weekday) = toWeekDate startDay
+    dayOfWeek = T.pack $ formatTime defaultTimeLocale "%A" targetDate
+    dateStr = T.pack $ formatTime defaultTimeLocale "%B %d, %Y" targetDate
+    timeStr =
+        T.pack $
+            drop 1 $
+                formatTime defaultTimeLocale "%l:%M %p" $
+                    UTCTime targetDate (secondsToDiffTime $ fromIntegral $ randomHour * 3600 + randomMinute * 60)
+    confidenceLevel
+        | randomWorkdays <= 7 = "Very High 🔥"
+        | randomWorkdays <= 14 = "High 👍"
+        | randomWorkdays <= 21 = "Moderate 🤔"
+        | otherwise = "Optimistic 🌟"
 
--- | Example Time Tool
+-- | Add workdays helper - more concise implementation with proper type handling
+addWorkdays :: Day -> Int -> Day
+addWorkdays day 0 = day
+addWorkdays day n
+    | weekday >= 6 = addWorkdays (addDays (fromIntegral (8 - weekday)) day) n -- Skip to Monday
+    | otherwise = addWorkdays (addDays 1 day) (n - 1)
+  where
+    (_, _, weekday) = toWeekDate day
+
+-- | Simple tools with no parameters
 timeTool :: Tool
-timeTool =
-    Tool
-        "current_time"
-        "Get the current time"
-        ( object
-            [ "type" .= ("object" :: Text)
-            , "properties" .= object []
-            ]
-        )
+timeTool = Tool "current_time" "Get the current time" (simpleSchema [])
 
 timeHandler :: Value -> IO ToolResult
 timeHandler _ = do
     now <- getCurrentTime
-    return $
-        ToolResult
-            [ContentItem "text" ("Current time: " <> T.pack (show now))]
-            Nothing
+    return $ success $ "Current time: " <> T.pack (show now)
 
--- | Example Calculator Tool
-calculatorTool :: Tool
-calculatorTool =
-    Tool
-        "calculate"
-        "Perform basic arithmetic calculations"
-        ( object
-            [ "type" .= ("object" :: Text)
-            , "properties"
-                .= object
-                    [ "expression"
-                        .= object
-                            [ "type" .= ("string" :: Text)
-                            , "description" .= ("Mathematical expression to evaluate (e.g., '2 + 3 * 4')" :: Text)
-                            ]
-                    ]
-            , "required" .= (["expression"] :: [Text])
-            ]
-        )
-
-calculatorHandler :: Value -> IO ToolResult
-calculatorHandler args = case fromJSON args of
-    Error err ->
-        return $
-            ToolResult
-                [ContentItem "text" ("Error parsing arguments: " <> T.pack err)]
-                (Just True)
-    Success obj -> case obj of
-        Object o -> case KM.lookup "expression" o of
-            Just (String expr) -> do
-                case evaluateExpression (T.unpack expr) of
-                    Left err ->
-                        return $
-                            ToolResult
-                                [ContentItem "text" ("Calculation error: " <> T.pack err)]
-                                (Just True)
-                    Right result ->
-                        return $
-                            ToolResult
-                                [ContentItem "text" ("Result: " <> T.pack (show result))]
-                                Nothing
-            _ ->
-                return $
-                    ToolResult
-                        [ContentItem "text" "Missing or invalid 'expression' parameter"]
-                        (Just True)
-        _ ->
-            return $
-                ToolResult
-                    [ContentItem "text" "Invalid arguments format"]
-                    (Just True)
-
--- | Random Number Generator Tool
-randomNumberTool :: Tool
-randomNumberTool =
-    Tool
-        "random_number"
-        "Generate a random number within a specified range"
-        ( object
-            [ "type" .= ("object" :: Text)
-            , "properties"
-                .= object
-                    [ "min"
-                        .= object
-                            [ "type" .= ("integer" :: Text)
-                            , "description" .= ("Minimum value (default: 1)" :: Text)
-                            ]
-                    , "max"
-                        .= object
-                            [ "type" .= ("integer" :: Text)
-                            , "description" .= ("Maximum value (default: 100)" :: Text)
-                            ]
-                    ]
-            ]
-        )
-
-randomNumberHandler :: Value -> IO ToolResult
-randomNumberHandler args = case fromJSON args of
-    Error err ->
-        return $
-            ToolResult
-                [ContentItem "text" ("Error parsing arguments: " <> T.pack err)]
-                (Just True)
-    Success obj -> case obj of
-        Object o -> do
-            let minVal :: Int = case KM.lookup "min" o of
-                    Just (Number n) -> floor n
-                    _ -> 1
-            let maxVal :: Int = case KM.lookup "max" o of
-                    Just (Number n) -> floor n
-                    _ -> 100
-
-            if minVal > maxVal
-                then
-                    return $
-                        ToolResult
-                            [ContentItem "text" "Error: minimum value must be less than or equal to maximum value"]
-                            (Just True)
-                else do
-                    randomNum <- randomRIO (minVal, maxVal) :: IO Int
-                    return $
-                        ToolResult
-                            [ContentItem "text" ("Random number: " <> T.pack (show randomNum) <> " (range: " <> T.pack (show minVal) <> "-" <> T.pack (show maxVal) <> ")")]
-                            Nothing
-        _ ->
-            return $
-                ToolResult
-                    [ContentItem "text" "Invalid arguments format"]
-                    (Just True)
-
--- | Text Analysis Tool
-textAnalysisTool :: Tool
-textAnalysisTool =
-    Tool
-        "text_analysis"
-        "Analyze text and provide statistics (word count, character count, etc.)"
-        ( object
-            [ "type" .= ("object" :: Text)
-            , "properties"
-                .= object
-                    [ "text"
-                        .= object
-                            [ "type" .= ("string" :: Text)
-                            , "description" .= ("Text to analyze" :: Text)
-                            ]
-                    ]
-            , "required" .= (["text"] :: [Text])
-            ]
-        )
-
-textAnalysisHandler :: Value -> IO ToolResult
-textAnalysisHandler args = case fromJSON args of
-    Error err ->
-        return $
-            ToolResult
-                [ContentItem "text" ("Error parsing arguments: " <> T.pack err)]
-                (Just True)
-    Success obj -> case obj of
-        Object o -> case KM.lookup "text" o of
-            Just (String text) -> do
-                let charCount = T.length text
-                let wordCount = length $ T.words text
-                let lineCount = length $ T.lines text
-                let sentences = length $ filter (`elem` (".!?" :: String)) $ T.unpack text
-                let paragraphs = length $ filter (not . T.null) $ T.splitOn "\n\n" text
-
-                let analysis =
-                        T.unlines
-                            [ "📊 Text Analysis Results:"
-                            , "━━━━━━━━━━━━━━━━━━━━━━━━"
-                            , "📝 Characters: " <> T.pack (show charCount)
-                            , "🔤 Words: " <> T.pack (show wordCount)
-                            , "📄 Lines: " <> T.pack (show lineCount)
-                            , "📋 Sentences: " <> T.pack (show sentences)
-                            , "📑 Paragraphs: " <> T.pack (show paragraphs)
-                            , ""
-                            , "📈 Averages:"
-                            , "• Characters per word: " <> T.pack (show $ if wordCount > 0 then fromIntegral charCount / fromIntegral wordCount else 0 :: Double)
-                            , "• Words per sentence: " <> T.pack (show $ if sentences > 0 then fromIntegral wordCount / fromIntegral sentences else 0 :: Double)
-                            ]
-
-                return $
-                    ToolResult
-                        [ContentItem "text" analysis]
-                        Nothing
-            _ ->
-                return $
-                    ToolResult
-                        [ContentItem "text" "Missing or invalid 'text' parameter"]
-                        (Just True)
-        _ ->
-            return $
-                ToolResult
-                    [ContentItem "text" "Invalid arguments format"]
-                    (Just True)
-
--- | Mock Weather Tool (demonstrates external API pattern)
-weatherTool :: Tool
-weatherTool =
-    Tool
-        "weather"
-        "Get weather information for a location (mock data for demo)"
-        ( object
-            [ "type" .= ("object" :: Text)
-            , "properties"
-                .= object
-                    [ "location"
-                        .= object
-                            [ "type" .= ("string" :: Text)
-                            , "description" .= ("Location to get weather for" :: Text)
-                            ]
-                    ]
-            , "required" .= (["location"] :: [Text])
-            ]
-        )
-
-weatherHandler :: Value -> IO ToolResult
-weatherHandler args = case fromJSON args of
-    Error err ->
-        return $
-            ToolResult
-                [ContentItem "text" ("Error parsing arguments: " <> T.pack err)]
-                (Just True)
-    Success obj -> case obj of
-        Object o -> case KM.lookup "location" o of
-            Just (String location) -> do
-                -- Generate some mock weather data
-                temp <- randomRIO (15, 30) :: IO Int
-                humidity <- randomRIO (40, 90) :: IO Int
-                conditions <- do
-                    r <- randomRIO (1, 4) :: IO Int
-                    return $ case r of
-                        1 -> "Sunny"
-                        2 -> "Cloudy"
-                        3 -> "Rainy"
-                        _ -> "Partly Cloudy"
-
-                let weather =
-                        T.unlines
-                            [ "🌤️  Weather Report for " <> location
-                            , "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                            , "🌡️  Temperature: " <> T.pack (show temp) <> "°C"
-                            , "💧 Humidity: " <> T.pack (show humidity) <> "%"
-                            , "☁️  Conditions: " <> conditions
-                            , ""
-                            , "⚠️  Note: This is mock data for demonstration"
-                            ]
-
-                return $
-                    ToolResult
-                        [ContentItem "text" weather]
-                        Nothing
-            _ ->
-                return $
-                    ToolResult
-                        [ContentItem "text" "Missing or invalid 'location' parameter"]
-                        (Just True)
-        _ ->
-            return $
-                ToolResult
-                    [ContentItem "text" "Invalid arguments format"]
-                    (Just True)
-
--- | UUID Generator Tool
 uuidTool :: Tool
-uuidTool =
-    Tool
-        "generate_uuid"
-        "Generate a random UUID (Universally Unique Identifier)"
-        ( object
-            [ "type" .= ("object" :: Text)
-            , "properties" .= object []
-            ]
-        )
+uuidTool = Tool "generate_uuid" "Generate a random UUID (Universally Unique Identifier)" (simpleSchema [])
 
 uuidHandler :: Value -> IO ToolResult
 uuidHandler _ = do
     uuid <- nextRandom
-    let uuidStr = T.pack $ toString uuid
-    return $
-        ToolResult
-            [ContentItem "text" ("Generated UUID: " <> uuidStr)]
-            Nothing
+    return $ success $ "Generated UUID: " <> T.pack (toString uuid)
 
--- | Base64 Encoding/Decoding Tool
+-- | Tools with single required parameter
+calculatorTool :: Tool
+calculatorTool =
+    Tool "calculate" "Perform basic arithmetic calculations" $
+        schemaWithRequired [("expression", stringProp "Mathematical expression to evaluate (e.g., '2 + 3 * 4')")] ["expression"]
+
+calculatorHandler :: Value -> IO ToolResult
+calculatorHandler args = return $ case requireString "expression" args of
+    Left err -> failure err
+    Right expr -> case evaluateExpression (T.unpack expr) of
+        Left err -> failure $ "Calculation error: " <> T.pack err
+        Right result -> success $ "Result: " <> T.pack (show result)
+
+textAnalysisTool :: Tool
+textAnalysisTool =
+    Tool "text_analysis" "Analyze text and provide statistics (word count, character count, etc.)" $
+        schemaWithRequired [("text", stringProp "Text to analyze")] ["text"]
+
+textAnalysisHandler :: Value -> IO ToolResult
+textAnalysisHandler args = return $ case requireString "text" args of
+    Left err -> failure err
+    Right text -> success $ analyzeText text
+
+-- | Extract text analysis logic into a pure function
+analyzeText :: Text -> Text
+analyzeText text =
+    T.unlines
+        [ "📊 Text Analysis Results:"
+        , "━━━━━━━━━━━━━━━━━━━━━━━━"
+        , "📝 Characters: " <> showT charCount
+        , "🔤 Words: " <> showT wordCount
+        , "📄 Lines: " <> showT lineCount
+        , "📋 Sentences: " <> showT sentences
+        , "📑 Paragraphs: " <> showT paragraphs
+        , ""
+        , "📈 Averages:"
+        , "• Characters per word: " <> showDouble charsPerWord
+        , "• Words per sentence: " <> showDouble wordsPerSentence
+        ]
+  where
+    charCount = T.length text
+    wordCount = length $ T.words text
+    lineCount = length $ T.lines text
+    sentences = length $ filter (`elem` (".!?" :: String)) $ T.unpack text
+    paragraphs = length $ filter (not . T.null) $ T.splitOn "\n\n" text
+    charsPerWord = if wordCount > 0 then fromIntegral charCount / fromIntegral wordCount else 0 :: Double
+    wordsPerSentence = if sentences > 0 then fromIntegral wordCount / fromIntegral sentences else 0 :: Double
+    showT = T.pack . show
+    showDouble = T.pack . show . (fromIntegral . round . (* 100)) . (/ 100) -- Round to 2 decimal places
+
+weatherTool :: Tool
+weatherTool =
+    Tool "weather" "Get weather information for a location (mock data for demo)" $
+        schemaWithRequired [("location", stringProp "Location to get weather for")] ["location"]
+
+weatherHandler :: Value -> IO ToolResult
+weatherHandler args = case requireString "location" args of
+    Left err -> return $ failure err
+    Right location -> do
+        weatherData <- generateMockWeather location
+        return $ success weatherData
+
+-- | Generate mock weather data - extracted into pure function where possible
+generateMockWeather :: Text -> IO Text
+generateMockWeather location = do
+    temp <- randomRIO (15, 30) :: IO Int
+    humidity <- randomRIO (40, 90) :: IO Int
+    conditions <- randomConditions
+
+    return $
+        T.unlines
+            [ "🌤️  Weather Report for " <> location
+            , "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            , "🌡️  Temperature: " <> showT temp <> "°C"
+            , "💧 Humidity: " <> showT humidity <> "%"
+            , "☁️  Conditions: " <> conditions
+            , ""
+            , "⚠️  Note: This is mock data for demonstration"
+            ]
+  where
+    showT = T.pack . show
+    randomConditions = do
+        r <- randomRIO (1, 4) :: IO Int
+        return $ case r of
+            1 -> "Sunny"
+            2 -> "Cloudy"
+            3 -> "Rainy"
+            _ -> "Partly Cloudy"
+
+-- | Tools with optional parameters
+randomNumberTool :: Tool
+randomNumberTool =
+    Tool "random_number" "Generate a random number within a specified range" $
+        simpleSchema
+            [ ("min", intProp "Minimum value (default: 1)")
+            , ("max", intProp "Maximum value (default: 100)")
+            ]
+
+randomNumberHandler :: Value -> IO ToolResult
+randomNumberHandler args = do
+    let minVal = optionalInt "min" 1 args
+        maxVal = optionalInt "max" 100 args
+
+    if minVal > maxVal
+        then return $ failure "Error: minimum value must be less than or equal to maximum value"
+        else do
+            randomNum <- randomRIO (minVal, maxVal) :: IO Int
+            return $
+                success $
+                    T.unwords
+                        [ "Random number:"
+                        , showT randomNum
+                        , "(range:"
+                        , showT minVal <> "-" <> showT maxVal <> ")"
+                        ]
+  where
+    showT = T.pack . show
+
+-- | Tools with multiple required parameters and validation
 base64Tool :: Tool
 base64Tool =
-    Tool
-        "base64"
-        "Encode or decode Base64 strings"
-        ( object
-            [ "type" .= ("object" :: Text)
-            , "properties"
-                .= object
-                    [ "operation"
-                        .= object
-                            [ "type" .= ("string" :: Text)
-                            , "enum" .= (["encode", "decode"] :: [Text])
-                            , "description" .= ("Operation to perform: 'encode' or 'decode'" :: Text)
-                            ]
-                    , "text"
-                        .= object
-                            [ "type" .= ("string" :: Text)
-                            , "description" .= ("Text to encode/decode" :: Text)
-                            ]
-                    ]
-            , "required" .= (["operation", "text"] :: [Text])
+    Tool "base64" "Encode or decode Base64 strings" $
+        schemaWithRequired
+            [ ("operation", enumProp "Operation to perform: 'encode' or 'decode'" ["encode", "decode"])
+            , ("text", stringProp "Text to encode/decode")
             ]
-        )
+            ["operation", "text"]
 
 base64Handler :: Value -> IO ToolResult
-base64Handler args = case fromJSON args of
-    Error err ->
-        return $
-            ToolResult
-                [ContentItem "text" ("Error parsing arguments: " <> T.pack err)]
-                (Just True)
-    Success obj -> case obj of
-        Object o -> do
-            let operation = case KM.lookup "operation" o of
-                    Just (String op) -> op
-                    _ -> ""
-            let text = case KM.lookup "text" o of
-                    Just (String t) -> t
-                    _ -> ""
-
-            case operation of
-                "encode" -> do
-                    let encoded = TE.decodeUtf8 $ B64.encode $ TE.encodeUtf8 text
-                    return $
-                        ToolResult
-                            [ContentItem "text" ("Base64 encoded: " <> encoded)]
-                            Nothing
-                "decode" -> do
-                    case B64.decode $ TE.encodeUtf8 text of
-                        Left err ->
-                            return $
-                                ToolResult
-                                    [ContentItem "text" ("Base64 decode error: " <> T.pack err)]
-                                    (Just True)
-                        Right decoded -> do
-                            let decodedText = TE.decodeUtf8 decoded
-                            return $
-                                ToolResult
-                                    [ContentItem "text" ("Base64 decoded: " <> decodedText)]
-                                    Nothing
-                _ ->
-                    return $
-                        ToolResult
-                            [ContentItem "text" "Invalid operation. Use 'encode' or 'decode'"]
-                            (Just True)
-        _ ->
-            return $
-                ToolResult
-                    [ContentItem "text" "Invalid arguments format"]
-                    (Just True)
-evaluateExpression :: String -> Either String Double
-evaluateExpression expr
-    | "+" `elem` words expr = evalBinaryOp expr "+" (+)
-    | "-" `elem` words expr = evalBinaryOp expr "-" (-)
-    | "*" `elem` words expr = evalBinaryOp expr "*" (*)
-    | "/" `elem` words expr = evalBinaryOp expr "/" safeDiv
-    | otherwise = case readMaybe expr of
-        Just n -> Right n
-        Nothing -> Left "Invalid expression format"
+base64Handler args = return $ case parseBase64Args args of
+    Left err -> failure err
+    Right (operation, text) -> case operation of
+        "encode" -> success $ "Base64 encoded: " <> encodeBase64 text
+        "decode" -> case decodeBase64 text of
+            Left err -> failure $ "Base64 decode error: " <> T.pack err
+            Right decoded -> success $ "Base64 decoded: " <> decoded
+        _ -> failure "Invalid operation. Use 'encode' or 'decode'"
   where
-    safeDiv :: Double -> Double -> Double
-    safeDiv _ 0 = error "Division by zero"
-    safeDiv x y = x / y
+    -- Extract the argument parsing logic into a separate function for clarity
+    parseBase64Args argValue = do
+        operation <- requireString "operation" argValue
+        text <- requireString "text" argValue
+        return (operation, text)
 
-    evalBinaryOp :: String -> String -> (Double -> Double -> Double) -> Either String Double
-    evalBinaryOp str op f = case break (== op) (words str) of
-        (leftParts, _ : rightParts) -> do
-            left <- case readMaybe (unwords leftParts) of
-                Just n -> Right n
-                Nothing -> Left "Invalid left operand"
-            right <- case readMaybe (unwords rightParts) of
-                Just n -> Right n
-                Nothing -> Left "Invalid right operand"
-            Right (f left right)
-        _ -> Left "Operator not found"
+    encodeBase64 = TE.decodeUtf8 . B64.encode . TE.encodeUtf8
+    decodeBase64 t = case B64.decode $ TE.encodeUtf8 t of
+        Left err -> Left err
+        Right decoded -> Right $ TE.decodeUtf8 decoded
+
+-- | Improved calculator with better error handling and more operations
+evaluateExpression :: String -> Either String Double
+evaluateExpression = parseAndEval . words
+  where
+    parseAndEval tokens = case tokens of
+        [num] -> maybeToEither "Invalid number" $ readMaybe num
+        [left, op, right] -> do
+            l <- maybeToEither "Invalid left operand" $ readMaybe left
+            r <- maybeToEither "Invalid right operand" $ readMaybe right
+            applyOp op l r
+        _ -> Left "Expression must be in format: number operator number"
+
+    applyOp "+" = \l r -> Right (l + r)
+    applyOp "-" = \l r -> Right (l - r)
+    applyOp "*" = \l r -> Right (l * r)
+    applyOp "/" = \l r -> if r == 0 then Left "Division by zero" else Right (l / r)
+    applyOp op = \_ _ -> Left $ "Unknown operator: " ++ op
+
+    maybeToEither err Nothing = Left err
+    maybeToEither _ (Just x) = Right x
