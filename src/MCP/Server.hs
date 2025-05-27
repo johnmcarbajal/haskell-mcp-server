@@ -1,5 +1,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
 module MCP.Server (
@@ -10,26 +12,25 @@ module MCP.Server (
     handleMessage,
 ) where
 
-import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (race)
 import Control.Concurrent.STM
 import Control.Exception (IOException, catch, finally)
-import Control.Monad (forever, void, when)
-import Control.Monad.IO.Class
+import Control.Monad (forever)
 import Data.Aeson
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KM
-import qualified Data.ByteString.Lazy as LBS
-import qualified Data.ByteString.Lazy.Char8 as L8
+import Data.Aeson.Types (parseMaybe)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.ByteString.Lazy.Char8 as L8
 import Network.WebSockets as WS
-import System.IO (hFlush, hIsEOF, hPutStrLn, isEOF, stderr, stdin, stdout)
+import System.IO (hFlush, hPutStrLn, stderr, stdout)
+import Text.Printf (printf)
 
 import MCP.Types
 
--- | MCP Server State - keeping this as is since it's well-structured
+-- * Server State
+
 data MCPServer = MCPServer
     { serverInfo :: ServerInfo
     , tools :: TVar [Tool]
@@ -39,215 +40,154 @@ data MCPServer = MCPServer
     , initialized :: TVar Bool
     }
 
--- | Default server configuration - simplified using applicative style
 defaultServer :: IO MCPServer
-defaultServer =
-    MCPServer
-        <$> pure defaultServerInfo
-        <*> newTVarIO []
-        <*> newTVarIO []
-        <*> newTVarIO Map.empty
-        <*> newTVarIO Map.empty
-        <*> newTVarIO False
+defaultServer = MCPServer defaultServerInfo
+    <$> newTVarIO []
+    <*> newTVarIO []
+    <*> newTVarIO Map.empty
+    <*> newTVarIO Map.empty
+    <*> newTVarIO False
   where
-    defaultServerInfo =
-        ServerInfo
-            { serverName = "haskell-mcp-server"
-            , serverVersion = "0.1.0"
-            , serverProtocolVersion = MCPVersion 2024 11
-            }
+    defaultServerInfo = ServerInfo "haskell-mcp-server" "0.1.0" (MCPVersion 2024 11)
 
--- | Centralized logging helper to reduce repetition
+-- * Utilities
+
 logInfo :: String -> IO ()
 logInfo msg = hPutStrLn stderr msg >> hFlush stderr
 
--- | Server startup message - extracted to reduce duplication
-logServerStartup :: IO ()
-logServerStartup = do
-    logInfo "Available tools: echo, current_time, calculate, random_number, text_analysis, weather, generate_uuid, base64, jeff_invite_predictor"
-    logInfo "Available resources: config://server.json"
+-- * JSON-RPC Response Builders
 
--- | JSON-RPC response builders - eliminating repetitive response construction
-mkSuccessResponse :: (ToJSON a) => Maybe Value -> a -> JSONRPCResponse
-mkSuccessResponse reqId result =
-    JSONRPCResponse
-        { responseJsonrpc = "2.0"
-        , responseResult = Just (toJSON result)
-        , responseError = Nothing
-        , responseId = reqId
-        }
+mkResponse :: Maybe Value -> Maybe Value -> Maybe JSONRPCError -> JSONRPCResponse
+mkResponse reqId result err = JSONRPCResponse "2.0" result err reqId
 
-mkErrorResponse :: Maybe Value -> Int -> Text -> JSONRPCResponse
-mkErrorResponse reqId code msg =
-    JSONRPCResponse
-        { responseJsonrpc = "2.0"
-        , responseResult = Nothing
-        , responseError = Just $ JSONRPCError code msg Nothing
-        , responseId = reqId
-        }
+success :: ToJSON a => Maybe Value -> a -> JSONRPCResponse
+success reqId = mkResponse reqId . Just . toJSON <*> pure Nothing
 
--- | Common error codes as constants for better maintainability
-parseError, invalidRequest, methodNotFound, invalidParams :: Int
+errorResponse :: Maybe Value -> Int -> Text -> JSONRPCResponse
+errorResponse reqId code msg = mkResponse reqId Nothing (Just $ JSONRPCError code msg Nothing)
+
+-- Error codes
+parseError, methodNotFound, invalidParams :: Int
 parseError = -32700
-invalidRequest = -32600
 methodNotFound = -32601
 invalidParams = -32602
 
--- | WebSocket server runner - simplified error handling
+-- * Server Runners
+
 runMCPServer :: MCPServer -> Int -> IO ()
 runMCPServer server port = do
-    logInfo $ "Starting MCP Server on port " ++ show port
-    logServerStartup
+    logInfo $ printf "Starting MCP Server on port %d" port
+    logStartupInfo
     WS.runServer "127.0.0.1" port $ \pending -> do
         conn <- WS.acceptRequest pending
         logInfo "Client connected"
-        WS.withPingThread conn 30 (return ()) $
+        WS.withPingThread conn 30 (pure ()) $
             handleClient server conn `finally` logInfo "Client disconnected"
 
--- | Stdio server with cleaner message processing loop
 runStdioServer :: MCPServer -> IO ()
 runStdioServer server = do
     logInfo "Starting MCP Server in stdio mode"
-    logServerStartup
+    logStartupInfo
     logInfo "Server ready, waiting for messages..."
-
-    readMessageLoop `catch` \(e :: IOException) -> do
+    
+    messageLoop `catch` \(e :: IOException) ->
         logInfo $ "Connection ended: " ++ show e
-        logInfo "Server shutting down"
   where
-    readMessageLoop = forever $ do
+    messageLoop = forever $ do
         logInfo "Waiting for next message..."
-        -- Simplified timeout handling with race
         race (threadDelay 5000000) getLine >>= \case
-            Left _ -> logInfo "Timeout waiting for message - client may have disconnected"
-            Right line -> processStdioMessage server line
+            Left _ -> logInfo "Timeout - client may have disconnected"
+            Right line -> processMessage server line
 
--- | Process a single stdio message - extracted for clarity
-processStdioMessage :: MCPServer -> String -> IO ()
-processStdioMessage server line = do
-    logInfo $ "Received message: " ++ take 100 line ++ "..."
+logStartupInfo :: IO ()
+logStartupInfo = do
+    logInfo "Available tools: echo, current_time, calculate, random_number, text_analysis, weather, generate_uuid, base64, jeff_invite_predictor"
+    logInfo "Available resources: config://server.json"
+
+processMessage :: MCPServer -> String -> IO ()
+processMessage server line = do
+    logInfo $ "Received: " ++ take 100 line ++ "..."
     case eitherDecode (L8.pack line) of
         Left err -> logInfo $ "Parse error: " ++ err
-        Right request -> do
-            logInfo $ "Processing request: " ++ T.unpack (requestMethod request)
-            handleMessage server request >>= \case
+        Right req -> do
+            logInfo $ "Processing: " ++ T.unpack (requestMethod req)
+            handleMessage server req >>= \case
                 Just resp -> do
-                    let respStr = L8.unpack (encode resp)
-                    logInfo $ "Sending response: " ++ take 100 respStr ++ "..."
+                    let respStr = take 100 $ L8.unpack $ encode resp
+                    logInfo $ "Sending: " ++ respStr ++ "..."
                     L8.putStrLn (encode resp) >> hFlush stdout
-                    logInfo $ "Response sent for: " ++ T.unpack (requestMethod request)
-                Nothing -> logInfo $ "No response needed for: " ++ T.unpack (requestMethod request)
+                    logInfo $ "Response sent for: " ++ T.unpack (requestMethod req)
+                Nothing -> logInfo $ "No response for: " ++ T.unpack (requestMethod req)
 
--- | WebSocket client handler - simplified with better error handling
 handleClient :: MCPServer -> WS.Connection -> IO ()
 handleClient server conn = forever $ do
     msg <- WS.receiveData conn
     case eitherDecode msg of
         Left err -> do
-            logInfo $ "Failed to decode message: " ++ err
-            WS.sendTextData conn . encode $ mkErrorResponse Nothing parseError "Parse error"
-        Right request ->
-            handleMessage server request >>= mapM_ (WS.sendTextData conn . encode)
+            logInfo $ "Decode error: " ++ err
+            WS.sendTextData conn . encode $ errorResponse Nothing parseError "Parse error"
+        Right req -> 
+            handleMessage server req >>= mapM_ (WS.sendTextData conn . encode)
 
--- | Main message dispatcher - using case expressions more idiomatically
+-- * Message Handling
+
 handleMessage :: MCPServer -> JSONRPCRequest -> IO (Maybe JSONRPCResponse)
-handleMessage server req = case requestMethod req of
-    "initialize" -> handleInitialize server req
-    "initialized" -> handleInitialized server req
-    "tools/list" -> handleListTools server req
-    "tools/call" -> handleCallTool server req
-    "resources/list" -> handleListResources server req
-    "resources/read" -> handleReadResource server req
-    _ -> return . Just $ mkErrorResponse (requestId req) methodNotFound "Method not found"
+handleMessage server req@JSONRPCRequest{requestMethod, requestId} = 
+    case requestMethod of
+        "initialize" -> handleInitialize server req
+        "initialized" -> handleInitialized server >> pure Nothing
+        "tools/list" -> Just . success requestId . object . pure . ("tools" .=) <$> readTVarIO (tools server)
+        "tools/call" -> handleToolCall server req
+        "resources/list" -> Just . success requestId . object . pure . ("resources" .=) <$> readTVarIO (resources server)
+        "resources/read" -> handleResourceRead server req
+        _ -> pure . Just $ errorResponse requestId methodNotFound "Method not found"
 
--- | Initialize handler - cleaner parameter parsing and response building
 handleInitialize :: MCPServer -> JSONRPCRequest -> IO (Maybe JSONRPCResponse)
-handleInitialize server req = do
+handleInitialize _ JSONRPCRequest{requestParams, requestId} = do
     logInfo "Handling initialize request"
-    case requestParams req >>= parseInitParams of
+    case requestParams >>= parseMaybe parseJSON of
         Nothing -> do
             logInfo "Failed to parse initialize params"
-            return . Just $ mkErrorResponse (requestId req) invalidParams "Invalid params"
-        Just initParams -> do
-            logInfo $ "Client protocol version: " ++ show (initProtocolVersion initParams)
-            logInfo $ "Client info: " ++ show (initClientInfo initParams)
-
-            let response = buildInitializeResponse
-            logInfo "Sending initialize response with protocol version: 2024-11-05"
-            return . Just $ mkSuccessResponse (requestId req) response
+            pure . Just $ errorResponse requestId invalidParams "Invalid params"
+        Just InitializeParams{initProtocolVersion, initClientInfo} -> do
+            logInfo $ "Client version: " ++ show initProtocolVersion
+            logInfo $ "Client info: " ++ show initClientInfo
+            logInfo "Sending initialize response"
+            pure . Just $ success requestId initializeResponse
   where
-    parseInitParams p = case fromJSON p of
-        Success params -> Just params
-        Error _ -> Nothing
-
-    buildInitializeResponse =
-        object
-            [ "protocolVersion" .= ("2024-11-05" :: Text)
-            , "capabilities"
-                .= object
-                    [ "tools" .= object ["listChanged" .= True]
-                    , "resources" .= object ["subscribe" .= False, "listChanged" .= True]
-                    ]
-            , "serverInfo"
-                .= object
-                    [ "name" .= ("haskell-mcp-server" :: Text)
-                    , "version" .= ("0.1.0" :: Text)
-                    ]
+    initializeResponse = object
+        [ "protocolVersion" .= ("2024-11-05" :: Text)
+        , "capabilities" .= object
+            [ "tools" .= object ["listChanged" .= True]
+            , "resources" .= object ["subscribe" .= False, "listChanged" .= True]
             ]
+        , "serverInfo" .= object
+            [ "name" .= ("haskell-mcp-server" :: Text)
+            , "version" .= ("0.1.0" :: Text)
+            ]
+        ]
 
--- | Initialized notification handler - using atomically for STM operation
-handleInitialized :: MCPServer -> JSONRPCRequest -> IO (Maybe JSONRPCResponse)
-handleInitialized server _ = do
-    atomically $ writeTVar (initialized server) True
+handleInitialized :: MCPServer -> IO ()
+handleInitialized MCPServer{initialized} = do
+    atomically $ writeTVar initialized True
     logInfo "Server initialized"
-    return Nothing
 
--- | Tools list handler - simplified with direct STM read
-handleListTools :: MCPServer -> JSONRPCRequest -> IO (Maybe JSONRPCResponse)
-handleListTools server req = do
-    toolsList <- readTVarIO (tools server)
-    return . Just $ mkSuccessResponse (requestId req) (object ["tools" .= toolsList])
+handleToolCall :: MCPServer -> JSONRPCRequest -> IO (Maybe JSONRPCResponse)
+handleToolCall MCPServer{toolHandlers} JSONRPCRequest{requestParams, requestId} =
+    case requestParams >>= parseMaybe parseJSON of
+        Nothing -> pure . Just $ errorResponse requestId invalidParams "Invalid params"
+        Just ToolCallArgs{callName, callArguments} -> do
+            handlers <- readTVarIO toolHandlers
+            case Map.lookup callName handlers of
+                Nothing -> pure . Just $ errorResponse requestId methodNotFound "Tool not found"
+                Just handler -> Just . success requestId <$> handler callArguments
 
--- | Tool call handler - cleaner parameter parsing and error handling
-handleCallTool :: MCPServer -> JSONRPCRequest -> IO (Maybe JSONRPCResponse)
-handleCallTool server req =
-    case requestParams req >>= parseToolCall of
-        Nothing ->
-            return . Just $ mkErrorResponse (requestId req) invalidParams "Invalid params"
-        Just (toolName, args) -> do
-            handlers <- readTVarIO (toolHandlers server)
-            case Map.lookup toolName handlers of
-                Nothing ->
-                    return . Just $ mkErrorResponse (requestId req) methodNotFound "Tool not found"
-                Just handler -> do
-                    result <- handler args
-                    return . Just $ mkSuccessResponse (requestId req) result
-  where
-    parseToolCall p = case fromJSON p of
-        Success (ToolCallArgs toolName args) -> Just (toolName, args)
-        Error _ -> Nothing
-
--- | Resources list handler - following same pattern as tools
-handleListResources :: MCPServer -> JSONRPCRequest -> IO (Maybe JSONRPCResponse)
-handleListResources server req = do
-    resourcesList <- readTVarIO (resources server)
-    return . Just $ mkSuccessResponse (requestId req) (object ["resources" .= resourcesList])
-
--- | Resource read handler - consistent with tool call pattern
-handleReadResource :: MCPServer -> JSONRPCRequest -> IO (Maybe JSONRPCResponse)
-handleReadResource server req =
-    case requestParams req >>= parseResourceUri of
-        Nothing ->
-            return . Just $ mkErrorResponse (requestId req) invalidParams "Invalid params"
+handleResourceRead :: MCPServer -> JSONRPCRequest -> IO (Maybe JSONRPCResponse)
+handleResourceRead MCPServer{resourceHandlers} JSONRPCRequest{requestParams, requestId} =
+    case requestParams >>= parseMaybe parseJSON of
+        Nothing -> pure . Just $ errorResponse requestId invalidParams "Invalid params"
         Just uri -> do
-            handlers <- readTVarIO (resourceHandlers server)
+            handlers <- readTVarIO resourceHandlers
             case Map.lookup uri handlers of
-                Nothing ->
-                    return . Just $ mkErrorResponse (requestId req) methodNotFound "Resource not found"
-                Just handler -> do
-                    content <- handler
-                    return . Just $ mkSuccessResponse (requestId req) content
-  where
-    parseResourceUri p = case fromJSON p of
-        Success uri -> Just uri
-        Error _ -> Nothing
+                Nothing -> pure . Just $ errorResponse requestId methodNotFound "Resource not found"
+                Just handler -> Just . success requestId <$> handler

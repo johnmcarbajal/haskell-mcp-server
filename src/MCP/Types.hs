@@ -1,7 +1,7 @@
--- Enables automatic JSON instance derivation
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards #-}
 
 module MCP.Types (
     -- * MCP Protocol Version
@@ -42,67 +42,64 @@ import Data.Aeson
 import Data.Text (Text)
 import qualified Data.Text as T
 import GHC.Generics
+import Text.Printf (printf)
 import Text.Read (readMaybe)
 
--- | MCP Protocol Version - fixed name shadowing and simplified JSON handling
+-- | MCP Protocol Version
 data MCPVersion = MCPVersion
-    { major :: Int
-    , minor :: Int -- Renamed from 'min' to avoid shadowing Prelude.min
+    { versionMajor :: Int
+    , versionMinor :: Int
     }
     deriving (Show, Eq, Generic)
 
--- Custom JSON instances for MCPVersion because it has a special string format
 instance ToJSON MCPVersion where
-    toJSON (MCPVersion maj minorVer) =
-        String $ T.pack $ show maj ++ "-" ++ zeroPad minorVer ++ "-01"
-      where
-        zeroPad n = if n < 10 then "0" ++ show n else show n
+    toJSON MCPVersion{..} = 
+        String . T.pack $ printf "%d-%02d-01" versionMajor versionMinor
 
 instance FromJSON MCPVersion where
-    parseJSON (String s) = case T.splitOn "-" s of
-        [yearStr, monthStr, _] ->
-            case (readMaybe (T.unpack yearStr), readMaybe (T.unpack monthStr)) of
-                (Just year, Just month) -> return $ MCPVersion year month
-                _ -> fail "Invalid version format"
-        _ -> fail "Invalid version format - expected YYYY-MM-DD"
-    parseJSON (Object o) = MCPVersion <$> o .: "major" <*> o .: "minor"
-    parseJSON _ = fail "Version must be string or object"
+    parseJSON = withText "MCPVersion" $ \s ->
+        case T.splitOn "-" s of
+            [yearStr, monthStr, _] -> do
+                year <- maybe (fail "Invalid year") pure $ readMaybe (T.unpack yearStr)
+                month <- maybe (fail "Invalid month") pure $ readMaybe (T.unpack monthStr)
+                pure $ MCPVersion year month
+            _ -> fail "Invalid version format - expected YYYY-MM-DD"
 
--- | Content Item - using generic JSON derivation since it has standard structure
+-- | Content Item
 data ContentItem = ContentItem
     { contentType :: Text
     , contentText :: Text
     }
     deriving (Show, Eq, Generic)
 
--- Custom JSON for ContentItem to match expected field names
 instance ToJSON ContentItem where
-    toJSON (ContentItem t txt) = object ["type" .= t, "text" .= txt]
+    toJSON ContentItem{..} = object 
+        [ "type" .= contentType
+        , "text" .= contentText
+        ]
 
 instance FromJSON ContentItem where
     parseJSON = withObject "ContentItem" $ \o ->
         ContentItem <$> o .: "type" <*> o .: "text"
 
--- | Tool Result - simplified with better field naming patterns
+-- | Tool Result
 data ToolResult = ToolResult
-    { toolResultContent :: [ContentItem]
-    , toolResultIsError :: Maybe Bool
+    { resultContent :: [ContentItem]
+    , resultIsError :: Maybe Bool
     }
     deriving (Show, Eq, Generic)
 
--- Custom JSON to map to expected field names
 instance ToJSON ToolResult where
-    toJSON (ToolResult content isError) =
-        object
-            [ "content" .= content
-            , "isError" .= isError
-            ]
+    toJSON ToolResult{..} = object
+        [ "content" .= resultContent
+        , "isError" .= resultIsError
+        ]
 
 instance FromJSON ToolResult where
     parseJSON = withObject "ToolResult" $ \o ->
         ToolResult <$> o .: "content" <*> o .:? "isError"
 
--- | JSON-RPC Error - using more concise construction pattern
+-- | JSON-RPC Error
 data JSONRPCError = JSONRPCError
     { errorCode :: Int
     , errorMessage :: Text
@@ -110,20 +107,18 @@ data JSONRPCError = JSONRPCError
     }
     deriving (Show, Eq, Generic)
 
--- Simplified JSON instances using object construction helpers
 instance ToJSON JSONRPCError where
-    toJSON (JSONRPCError code message mData) =
-        object
-            [ "code" .= code
-            , "message" .= message
-            , "data" .= mData
-            ]
+    toJSON JSONRPCError{..} = object
+        [ "code" .= errorCode
+        , "message" .= errorMessage
+        , "data" .= errorData
+        ]
 
 instance FromJSON JSONRPCError where
     parseJSON = withObject "JSONRPCError" $ \o ->
         JSONRPCError <$> o .: "code" <*> o .: "message" <*> o .:? "data"
 
--- | JSON-RPC Request - standard structure suitable for generic derivation
+-- | JSON-RPC Request
 data JSONRPCRequest = JSONRPCRequest
     { requestJsonrpc :: Text
     , requestMethod :: Text
@@ -132,25 +127,20 @@ data JSONRPCRequest = JSONRPCRequest
     }
     deriving (Show, Eq, Generic)
 
--- Custom JSON to handle field name mapping
 instance ToJSON JSONRPCRequest where
-    toJSON (JSONRPCRequest jsonrpc method params reqId) =
-        object
-            [ "jsonrpc" .= jsonrpc
-            , "method" .= method
-            , "params" .= params
-            , "id" .= reqId
-            ]
+    toJSON JSONRPCRequest{..} = object
+        [ "jsonrpc" .= requestJsonrpc
+        , "method" .= requestMethod
+        , "params" .= requestParams
+        , "id" .= requestId
+        ]
 
 instance FromJSON JSONRPCRequest where
     parseJSON = withObject "JSONRPCRequest" $ \o ->
-        JSONRPCRequest
-            <$> o .: "jsonrpc"
-            <*> o .: "method"
-            <*> o .:? "params"
-            <*> o .:? "id"
+        JSONRPCRequest <$> o .: "jsonrpc" <*> o .: "method" 
+                       <*> o .:? "params" <*> o .:? "id"
 
--- | JSON-RPC Response - improved conditional field inclusion
+-- | JSON-RPC Response
 data JSONRPCResponse = JSONRPCResponse
     { responseJsonrpc :: Text
     , responseResult :: Maybe Value
@@ -160,22 +150,17 @@ data JSONRPCResponse = JSONRPCResponse
     deriving (Show, Eq, Generic)
 
 instance ToJSON JSONRPCResponse where
-    toJSON (JSONRPCResponse jsonrpc mResult mError respId) =
-        object $ ["jsonrpc" .= jsonrpc, "id" .= respId] ++ optionalFields
-      where
-        optionalFields =
-            maybe [] (\result -> ["result" .= result]) mResult
-                ++ maybe [] (\err -> ["error" .= err]) mError
+    toJSON JSONRPCResponse{..} = object $ 
+        [ "jsonrpc" .= responseJsonrpc, "id" .= responseId ] <>
+        maybe [] (\r -> ["result" .= r]) responseResult <>
+        maybe [] (\e -> ["error" .= e]) responseError
 
 instance FromJSON JSONRPCResponse where
     parseJSON = withObject "JSONRPCResponse" $ \o ->
-        JSONRPCResponse
-            <$> o .: "jsonrpc"
-            <*> o .:? "result"
-            <*> o .:? "error"
-            <*> o .:? "id"
+        JSONRPCResponse <$> o .: "jsonrpc" <*> o .:? "result" 
+                        <*> o .:? "error" <*> o .:? "id"
 
--- | Server Information - can use generic derivation with field name mapping
+-- | Server Information
 data ServerInfo = ServerInfo
     { serverName :: Text
     , serverVersion :: Text
@@ -183,23 +168,18 @@ data ServerInfo = ServerInfo
     }
     deriving (Show, Eq, Generic)
 
--- Custom JSON to handle field name differences
 instance ToJSON ServerInfo where
-    toJSON (ServerInfo name version protocol) =
-        object
-            [ "name" .= name
-            , "version" .= version
-            , "protocolVersion" .= protocol
-            ]
+    toJSON ServerInfo{..} = object
+        [ "name" .= serverName
+        , "version" .= serverVersion
+        , "protocolVersion" .= serverProtocolVersion
+        ]
 
 instance FromJSON ServerInfo where
     parseJSON = withObject "ServerInfo" $ \o ->
-        ServerInfo
-            <$> o .: "name"
-            <*> o .: "version"
-            <*> o .: "protocolVersion"
+        ServerInfo <$> o .: "name" <*> o .: "version" <*> o .: "protocolVersion"
 
--- | Tool Definition - simplified construction
+-- | Tool Definition
 data Tool = Tool
     { toolName :: Text
     , toolDescription :: Text
@@ -208,18 +188,17 @@ data Tool = Tool
     deriving (Show, Eq, Generic)
 
 instance ToJSON Tool where
-    toJSON (Tool name desc schema) =
-        object
-            [ "name" .= name
-            , "description" .= desc
-            , "inputSchema" .= schema
-            ]
+    toJSON Tool{..} = object
+        [ "name" .= toolName
+        , "description" .= toolDescription
+        , "inputSchema" .= toolInputSchema
+        ]
 
 instance FromJSON Tool where
     parseJSON = withObject "Tool" $ \o ->
         Tool <$> o .: "name" <*> o .: "description" <*> o .: "inputSchema"
 
--- | Resource Definition - handling optional fields cleanly
+-- | Resource Definition
 data Resource = Resource
     { resourceUri :: Text
     , resourceName :: Text
@@ -229,43 +208,36 @@ data Resource = Resource
     deriving (Show, Eq, Generic)
 
 instance ToJSON Resource where
-    toJSON (Resource uri name desc mimeType) =
-        object
-            [ "uri" .= uri
-            , "name" .= name
-            , "description" .= desc
-            , "mimeType" .= mimeType
-            ]
+    toJSON Resource{..} = object
+        [ "uri" .= resourceUri
+        , "name" .= resourceName
+        , "description" .= resourceDescription
+        , "mimeType" .= resourceMimeType
+        ]
 
 instance FromJSON Resource where
     parseJSON = withObject "Resource" $ \o ->
-        Resource
-            <$> o .: "uri"
-            <*> o .: "name"
-            <*> o .:? "description"
-            <*> o .:? "mimeType"
+        Resource <$> o .: "uri" <*> o .: "name" 
+                 <*> o .:? "description" <*> o .:? "mimeType"
 
--- | Tool Call Arguments - straightforward mapping
+-- | Tool Call Arguments
 data ToolCallArgs = ToolCallArgs
-    { toolCallName :: Text
-    , toolCallArguments :: Value
+    { callName :: Text
+    , callArguments :: Value
     }
     deriving (Show, Eq, Generic)
 
 instance ToJSON ToolCallArgs where
-    toJSON (ToolCallArgs name args) =
-        object
-            [ "name" .= name
-            , "arguments" .= args
-            ]
+    toJSON ToolCallArgs{..} = object
+        [ "name" .= callName
+        , "arguments" .= callArguments
+        ]
 
 instance FromJSON ToolCallArgs where
     parseJSON = withObject "ToolCallArgs" $ \o ->
         ToolCallArgs <$> o .: "name" <*> o .: "arguments"
 
--- | Simple types that can benefit from generic derivation with custom field names
-
--- Client Info - basic structure
+-- | Client Info
 data ClientInfo = ClientInfo
     { clientName :: Text
     , clientVersion :: Text
@@ -273,55 +245,56 @@ data ClientInfo = ClientInfo
     deriving (Show, Eq, Generic)
 
 instance ToJSON ClientInfo where
-    toJSON (ClientInfo name version) = object ["name" .= name, "version" .= version]
+    toJSON ClientInfo{..} = object
+        [ "name" .= clientName
+        , "version" .= clientVersion
+        ]
 
 instance FromJSON ClientInfo where
     parseJSON = withObject "ClientInfo" $ \o ->
         ClientInfo <$> o .: "name" <*> o .: "version"
 
--- | Capability types - these are good candidates for generic derivation
-data RootsCapability = RootsCapability
+-- | Roots Capability
+newtype RootsCapability = RootsCapability
     { rootsListChanged :: Maybe Bool
     }
     deriving (Show, Eq, Generic)
 
 instance ToJSON RootsCapability where
-    toJSON (RootsCapability listChanged) = object ["listChanged" .= listChanged]
+    toJSON RootsCapability{..} = object ["listChanged" .= rootsListChanged]
 
 instance FromJSON RootsCapability where
     parseJSON = withObject "RootsCapability" $ \o ->
         RootsCapability <$> o .:? "listChanged"
 
--- Sampling capability is empty for now, so we can use a simple approach
+-- | Sampling Capability
 data SamplingCapability = SamplingCapability
     deriving (Show, Eq, Generic)
 
--- For empty types, we can use very simple JSON instances
 instance ToJSON SamplingCapability where
-    toJSON SamplingCapability = object []
+    toJSON _ = object []
 
 instance FromJSON SamplingCapability where
-    parseJSON = withObject "SamplingCapability" $ \_ -> return SamplingCapability
+    parseJSON = withObject "SamplingCapability" $ const $ pure SamplingCapability
 
--- | Client capabilities combining the individual capability types
+-- | Client Capabilities
 data ClientCapabilities = ClientCapabilities
-    { clientRoots :: Maybe RootsCapability
-    , clientSampling :: Maybe SamplingCapability
+    { capabilitiesRoots :: Maybe RootsCapability
+    , capabilitiesSampling :: Maybe SamplingCapability
     }
     deriving (Show, Eq, Generic)
 
 instance ToJSON ClientCapabilities where
-    toJSON (ClientCapabilities roots sampling) =
-        object
-            [ "roots" .= roots
-            , "sampling" .= sampling
-            ]
+    toJSON ClientCapabilities{..} = object
+        [ "roots" .= capabilitiesRoots
+        , "sampling" .= capabilitiesSampling
+        ]
 
 instance FromJSON ClientCapabilities where
     parseJSON = withObject "ClientCapabilities" $ \o ->
         ClientCapabilities <$> o .:? "roots" <*> o .:? "sampling"
 
--- | Initialize parameters - the top-level request structure
+-- | Initialize Parameters
 data InitializeParams = InitializeParams
     { initProtocolVersion :: MCPVersion
     , initCapabilities :: ClientCapabilities
@@ -330,16 +303,12 @@ data InitializeParams = InitializeParams
     deriving (Show, Eq, Generic)
 
 instance ToJSON InitializeParams where
-    toJSON (InitializeParams protocol capabilities clientInfo) =
-        object
-            [ "protocolVersion" .= protocol
-            , "capabilities" .= capabilities
-            , "clientInfo" .= clientInfo
-            ]
+    toJSON InitializeParams{..} = object
+        [ "protocolVersion" .= initProtocolVersion
+        , "capabilities" .= initCapabilities
+        , "clientInfo" .= initClientInfo
+        ]
 
 instance FromJSON InitializeParams where
     parseJSON = withObject "InitializeParams" $ \o ->
-        InitializeParams
-            <$> o .: "protocolVersion"
-            <*> o .: "capabilities"
-            <*> o .: "clientInfo"
+        InitializeParams <$> o .: "protocolVersion" <*> o .: "capabilities" <*> o .: "clientInfo"
