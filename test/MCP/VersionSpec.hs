@@ -26,8 +26,8 @@ spec = describe "Protocol Version Handling" $ do
         it "serializes future version correctly" $ do
             toJSON (MCPVersion 2030 12) `shouldBe` String "2030-12-01"
             
-        it "serializes minimum version (0,0)" $ do
-            toJSON (MCPVersion 0 0) `shouldBe` String "0-00-01"
+        it "serializes minimum version (2000,0)" $ do
+            toJSON (MCPVersion 2000 0) `shouldBe` String "2000-00-01"
             
         it "serializes very large version numbers" $ do
             toJSON (MCPVersion 9999 99) `shouldBe` String "9999-99-01"
@@ -94,9 +94,9 @@ spec = describe "Protocol Version Handling" $ do
                     [ MCPVersion 2024 11
                     , MCPVersion 2024 5
                     , MCPVersion 2024 0
-                    , MCPVersion 0 0
-                    , MCPVersion 9999 12
-                    , MCPVersion 1 1
+                    , MCPVersion 2000 0
+                    , MCPVersion 2100 12
+                    , MCPVersion 2050 1
                     ]
             forM_ versions $ \ver -> do
                 let encoded = encode ver
@@ -174,7 +174,8 @@ spec = describe "Protocol Version Handling" $ do
     describe "Edge cases and malformed input" $ do
         it "handles version with leading zeros" $ do
             let jsonValue = String "0024-01-01"
-            decode (encode jsonValue) `shouldBe` Just (MCPVersion 24 1)
+            -- Leading zeros parse to 24, which is < 2000 and thus invalid
+            (decode (encode jsonValue) :: Maybe MCPVersion) `shouldBe` Nothing
             
         it "handles version with Unicode characters (should fail)" $ do
             let jsonValue = String "2024-1①-01"
@@ -190,12 +191,8 @@ spec = describe "Protocol Version Handling" $ do
             (decode (encode jsonValue) :: Maybe MCPVersion) `shouldBe` Nothing
             
         it "handles extremely long version strings (overflow behavior)" $ do
-            -- Note: The current implementation parses but may overflow to negative
+            -- Note: The current implementation rejects overflowed/invalid values
             let longYear = T.replicate 1000 "9"
                 jsonValue = String (longYear <> "-11-01")
-            case decode (encode jsonValue) of
-                Just (MCPVersion major minor) -> do
-                    -- The parser succeeds but the integer overflows
-                    major `shouldSatisfy` (< 0)  -- Overflow to negative
-                    minor `shouldBe` 11
-                Nothing -> expectationFailure "Expected parse to succeed with overflow"
+            -- This should fail because the year is way outside valid range
+            (decode (encode jsonValue) :: Maybe MCPVersion) `shouldBe` Nothing

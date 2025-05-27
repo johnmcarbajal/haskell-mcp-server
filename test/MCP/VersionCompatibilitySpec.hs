@@ -90,8 +90,8 @@ spec = describe "Version Compatibility" $ do
             isCompatible (MCPVersion 2023 11) (MCPVersion 2024 11) `shouldBe` False
             
         it "handles edge cases" $ do
-            isCompatible (MCPVersion 0 0) (MCPVersion 0 99) `shouldBe` True
-            isCompatible (MCPVersion 0 0) (MCPVersion 1 0) `shouldBe` False
+            isCompatible (MCPVersion 2000 0) (MCPVersion 2000 99) `shouldBe` True
+            isCompatible (MCPVersion 2000 0) (MCPVersion 2001 0) `shouldBe` False
 
     describe "canServerHandleClient" $ do
         it "server handles same version client" $ do
@@ -139,11 +139,11 @@ spec = describe "Version Compatibility" $ do
         it "returns version with same major and minor 0" $ do
             getMinCompatibleVersion (MCPVersion 2024 11) `shouldBe` MCPVersion 2024 0
             getMinCompatibleVersion (MCPVersion 2025 99) `shouldBe` MCPVersion 2025 0
-            getMinCompatibleVersion (MCPVersion 1 5) `shouldBe` MCPVersion 1 0
+            getMinCompatibleVersion (MCPVersion 2001 5) `shouldBe` MCPVersion 2001 0
             
         it "handles edge cases" $ do
-            getMinCompatibleVersion (MCPVersion 0 99) `shouldBe` MCPVersion 0 0
-            getMinCompatibleVersion (MCPVersion 9999 12) `shouldBe` MCPVersion 9999 0
+            getMinCompatibleVersion (MCPVersion 2000 99) `shouldBe` MCPVersion 2000 0
+            getMinCompatibleVersion (MCPVersion 2100 12) `shouldBe` MCPVersion 2100 0
 
     describe "getLatestCompatible" $ do
         it "finds latest compatible version from list" $ do
@@ -229,7 +229,7 @@ spec = describe "Version Compatibility" $ do
                     , ((2024, 10), (2024, 11), True)   -- client newer
                     , ((2024, 11), (2025, 11), False)  -- major mismatch
                     , ((2024, 0), (2024, 99), True)    -- extreme minor diff
-                    , ((0, 0), (0, 0), True)           -- zero version
+                    , ((2000, 0), (2000, 0), True)     -- minimum version
                     , ((2024, 11), (2023, 11), False)  -- older major
                     ]
                     

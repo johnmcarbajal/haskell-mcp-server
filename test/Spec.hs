@@ -13,6 +13,8 @@ import MCP.Tools
 import MCP.Types
 import qualified MCP.VersionSpec
 import qualified MCP.VersionCompatibilitySpec
+import qualified ComprehensiveSpec
+import qualified PropertySpec
 import qualified MCP.Version.ValidationSpec
 
 -- Helper function to extract tool name from Tool
@@ -48,6 +50,8 @@ main = hspec $ do
     MCP.VersionSpec.spec
     MCP.VersionCompatibilitySpec.spec
     MCP.Version.ValidationSpec.spec
+    ComprehensiveSpec.comprehensiveSpec
+    PropertySpec.propertySpec
     
     describe "MCP Types" $ do
         it "serializes and deserializes JSONRPCRequest" $ do
