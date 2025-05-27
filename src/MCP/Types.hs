@@ -62,7 +62,14 @@ instance FromJSON MCPVersion where
             [yearStr, monthStr, _] -> do
                 year <- maybe (fail "Invalid year") pure $ readMaybe (T.unpack yearStr)
                 month <- maybe (fail "Invalid month") pure $ readMaybe (T.unpack monthStr)
-                pure $ MCPVersion year month
+                let version = MCPVersion year month
+                -- Validate the version
+                if year < 0 then fail "Negative major version not allowed"
+                else if month < 0 then fail "Negative minor version not allowed"
+                else if year < 2000 then fail "Major version too small (minimum: 2000)"
+                else if year > 2100 then fail "Major version too large (maximum: 2100)"
+                else if month > 12 then fail "Invalid month value (must be 0-12)"
+                else pure version
             _ -> fail "Invalid version format - expected YYYY-MM-DD"
 
 -- | Content Item

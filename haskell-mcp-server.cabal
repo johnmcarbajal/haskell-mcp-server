@@ -93,6 +93,7 @@ test-suite haskell-mcp-server-test
   type: exitcode-stdio-1.0
   main-is: Spec.hs
   other-modules:
+      MCP.VersionSpec
       Paths_haskell_mcp_server
   hs-source-dirs:
       test

@@ -70,6 +70,10 @@ tests:
   haskell-mcp-server-test:
     main: Spec.hs
     source-dirs: test
+    other-modules:
+      - MCP.VersionSpec
+      - MCP.VersionCompatibilitySpec
+      - MCP.Version.ValidationSpec
     ghc-options:
       - -threaded
       - -rtsopts
