@@ -70,6 +70,12 @@ tests:
   haskell-mcp-server-test:
     main: Spec.hs
     source-dirs: test
+    other-modules:
+      - MCP.VersionSpec
+      - MCP.VersionCompatibilitySpec
+      - ComprehensiveSpec
+      - PropertySpec
+      - MCP.Version.ValidationSpec
     ghc-options:
       - -threaded
       - -rtsopts
@@ -77,3 +83,6 @@ tests:
     dependencies:
       - haskell-mcp-server
       - hspec
+      - QuickCheck
+      - quickcheck-instances
+      - unordered-containers

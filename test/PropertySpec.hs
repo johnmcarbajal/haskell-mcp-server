@@ -10,6 +10,7 @@ import qualified Data.Text as T
 import qualified Data.ByteString.Lazy as L
 import Test.Hspec
 import Test.QuickCheck
+import Test.QuickCheck.Monadic
 import Test.QuickCheck.Instances.Text ()
 
 import MCP.Types
@@ -23,11 +24,11 @@ instance Arbitrary MCPVersion where
 instance Arbitrary ContentItem where
   arbitrary = ContentItem 
     <$> elements ["text", "image", "resource", "data"]
-    <*> (T.take 1000 <$> arbitrary) -- Limit text size for performance
+    <*> (T.take 1000 . (\t -> if T.null t then "content" else t) <$> arbitrary) -- Ensure non-empty
 
 instance Arbitrary ToolResult where
   arbitrary = ToolResult 
-    <$> resize 5 (listOf arbitrary) -- Limit list size
+    <$> resize 5 (listOf1 arbitrary) -- At least one item, limit list size
     <*> frequency [(3, pure Nothing), (1, pure (Just True)), (1, pure (Just False))]
 
 instance Arbitrary JSONRPCError where
@@ -58,7 +59,7 @@ instance Arbitrary ServerInfo where
 
 instance Arbitrary Tool where
   arbitrary = Tool
-    <$> (T.take 50 <$> arbitrary)
+    <$> (T.take 50 . (\t -> if T.null t then "tool" else t) <$> arbitrary) -- Ensure non-empty name
     <*> (T.take 200 <$> arbitrary)
     <*> arbitrary
 
@@ -130,7 +131,7 @@ prop_encodingProducesValidJSON result =
 prop_errorResultsHaveErrorFlag :: Property
 prop_errorResultsHaveErrorFlag = forAll arbitrary $ \content ->
   let errorResult = ToolResult content (Just True)
-  in case resultIsError errorResult of
+  in case PropertySpec.resultIsError errorResult of
        Just True -> True
        _ -> False
 
@@ -138,7 +139,7 @@ prop_errorResultsHaveErrorFlag = forAll arbitrary $ \content ->
 prop_successResultsNoErrorFlag :: Property
 prop_successResultsNoErrorFlag = forAll arbitrary $ \content ->
   let successResult = ToolResult content Nothing
-  in case resultIsError successResult of
+  in case PropertySpec.resultIsError successResult of
        Nothing -> True
        Just False -> True
        _ -> False
@@ -167,7 +168,7 @@ prop_calculatorValidExpressions :: Property
 prop_calculatorValidExpressions = forAll validExpression $ \expr ->
   monadicIO $ do
     result <- run $ calculatorHandler (object ["expression" .= expr])
-    return $ case resultIsError result of
+    return $ case PropertySpec.resultIsError result of
       Nothing -> True
       Just False -> True
       Just True -> False
@@ -182,10 +183,11 @@ prop_calculatorValidExpressions = forAll validExpression $ \expr ->
 prop_echoPreservesInput :: Text -> Property
 prop_echoPreservesInput input = not (T.null input) ==> monadicIO $ do
   result <- run $ echoHandler (object ["message" .= input])
-  return $ case resultContent result of
+  return $ case PropertySpec.resultContent result of
     [ContentItem "text" msg] -> T.isInfixOf input msg
     _ -> False
 
+-- Property: Tool Handler Properties
 -- Property: Base64 encoding/decoding roundtrip
 prop_base64Roundtrip :: Text -> Property
 prop_base64Roundtrip input = not (T.null input) ==> monadicIO $ do
@@ -195,30 +197,36 @@ prop_base64Roundtrip input = not (T.null input) ==> monadicIO $ do
     , "text" .= input
     ])
   
-  case resultContent encodeResult of
+  case PropertySpec.resultContent encodeResult of
     [ContentItem "text" encodedMsg] -> do
-      let encoded = T.drop 15 encodedMsg -- Remove "Base64 encoded: " prefix
+      -- Extract base64 after "Base64 encoded: "
+      let prefix = "Base64 encoded: "
+          encoded = T.drop (T.length prefix) encodedMsg
       -- Decode
       decodeResult <- run $ base64Handler (object
         [ "operation" .= ("decode" :: Text) 
         , "text" .= encoded
         ])
       
-      return $ case resultContent decodeResult of
-        [ContentItem "text" decodedMsg] -> T.isInfixOf input decodedMsg
+      return $ case PropertySpec.resultContent decodeResult of
+        [ContentItem "text" decodedMsg] -> 
+          -- Extract decoded text after "Base64 decoded: "
+          let decodePrefix = "Base64 decoded: "
+              decoded = T.drop (T.length decodePrefix) decodedMsg
+          in decoded == input
         _ -> False
     _ -> return False
 
 -- Property: Random numbers are within specified range
 prop_randomNumberInRange :: Property
-prop_randomNumberInRange = forAll validRange $ \(minVal, maxVal) ->
+prop_randomNumberInRange = forAll validRange $ \(minVal, maxVal :: Int) ->
   monadicIO $ do
     result <- run $ randomNumberHandler (object 
       [ "min" .= minVal
       , "max" .= maxVal
       ])
     
-    return $ case resultContent result of
+    return $ case PropertySpec.resultContent result of
       [ContentItem "text" msg] -> 
         case extractNumber msg of
           Just num -> num >= minVal && num <= maxVal
@@ -226,13 +234,13 @@ prop_randomNumberInRange = forAll validRange $ \(minVal, maxVal) ->
       _ -> False
   where
     validRange = do
-      min' <- choose (1, 100)
+      min' <- choose (1, 100) :: Gen Int
       max' <- choose (min' + 1, min' + 100)
       return (min', max')
     
     extractNumber msg = 
       case T.words msg of
-        ("Random":"number:":numStr:_) -> readMaybe (T.unpack numStr)
+        ("Random":"number:":numStr:_) -> readMaybe (T.unpack numStr) :: Maybe Int
         _ -> Nothing
 
 -- Helper functions

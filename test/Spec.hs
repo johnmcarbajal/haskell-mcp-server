@@ -11,6 +11,11 @@ import Test.Hspec
 import MCP.Server
 import MCP.Tools
 import MCP.Types
+import qualified MCP.VersionSpec
+import qualified MCP.VersionCompatibilitySpec
+import qualified ComprehensiveSpec
+import qualified PropertySpec
+import qualified MCP.Version.ValidationSpec
 
 -- Helper function to extract tool name from Tool
 getToolName :: Tool -> T.Text
@@ -42,6 +47,12 @@ getToolResultIsError (ToolResult _ isErr) = isErr
 
 main :: IO ()
 main = hspec $ do
+    MCP.VersionSpec.spec
+    MCP.VersionCompatibilitySpec.spec
+    MCP.Version.ValidationSpec.spec
+    ComprehensiveSpec.comprehensiveSpec
+    PropertySpec.propertySpec
+    
     describe "MCP Types" $ do
         it "serializes and deserializes JSONRPCRequest" $ do
             let request =
